@@ -4,6 +4,7 @@ const {
   retrainModel,
 } = require('../deep-learning/deep-learning-connector');
 const { queueRetrain, getJobStatus } = require('../queue/job-queue');
+const { handleQueueError, isRedisError } = require('../utils/queueErrorHelper');
 
 const router = express.Router();
 
@@ -52,52 +53,66 @@ router.post('/', (req, res) => {
 router.post('/offline', async (req, res) => {
   try {
     const { modelId, trainingDataset, testingDataset, training_parameters, isACApp, useQueue } = req.body || {};
-    
+
     if (!modelId || !trainingDataset || !testingDataset) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'Missing required parameters',
         message: 'modelId, trainingDataset, and testingDataset are required'
       });
     }
-    
+
     // training_parameters is optional (AC apps may not need it)
     const params = training_parameters || {};
-    
+
     // Queue-based approach is ENABLED BY DEFAULT
     const useQueueDefault = process.env.USE_QUEUE_BY_DEFAULT !== 'false';
     const shouldUseQueue = useQueue !== undefined ? useQueue : useQueueDefault;
-    
+    let fallbackToSync = false;
+
     if (shouldUseQueue) {
-      // Queue the retrain job
-      const jobInfo = await queueRetrain({
-        modelId,
-        trainingDataset,
-        testingDataset,
-        training_parameters: params,
-        isACApp: isACApp || false,
-        priority: 5
-      });
-      
-      return res.json({
-        success: true,
-        useQueue: true,
-        jobId: jobInfo.jobId,
-        queueName: jobInfo.queueName,
-        position: jobInfo.position,
-        estimatedWait: jobInfo.estimatedWait,
-        message: 'Retrain job queued successfully'
-      });
+      let jobInfo;
+      try {
+        // Queue the retrain job
+        jobInfo = await queueRetrain({
+          modelId,
+          trainingDataset,
+          testingDataset,
+          training_parameters: params,
+          isACApp: isACApp || false,
+          priority: 5
+        });
+        
+        return res.json({
+          success: true,
+          useQueue: true,
+          jobId: jobInfo.jobId,
+          queueName: jobInfo.queueName,
+          position: jobInfo.position,
+          estimatedWait: jobInfo.estimatedWait,
+          message: 'Retrain job queued successfully'
+        });
+      } catch (error) {
+        // Check if it's a Redis connection error
+        if (isRedisError(error)) {
+          console.warn('[Retrain] Redis unavailable, automatically falling back to sync mode');
+          fallbackToSync = true;
+          // Fall through to sync processing below
+        } else {
+          // For non-Redis errors, return the error
+          return handleQueueError(res, error, 'Retrain queue');
+        }
+      }
     }
-    
-    // Direct processing (blocking) - only if useQueue=false
-    
+
+    // Direct processing (blocking) - used when useQueue=false OR when Redis is unavailable
+
     const retrainConfig = {
       modelId,
       trainingDataset,
       testingDataset,
       training_parameters: params
     };
-    
+
     retrainModel(retrainConfig, (retrainStatus) => {
       if (retrainStatus.error) {
         return res.status(500).json({
@@ -105,16 +120,24 @@ router.post('/offline', async (req, res) => {
           error: retrainStatus.error
         });
       }
-      
-      res.json({
+
+      const response = {
         success: true,
         useQueue: false,
         retrainId: retrainStatus.retrainId,
         ...retrainStatus,
-        message: 'Retrain started (blocking mode)'
-      });
+        message: fallbackToSync 
+          ? 'Retrain started in sync mode (Redis unavailable, automatic fallback)' 
+          : 'Retrain started (blocking mode)'
+      };
+
+      if (fallbackToSync) {
+        response.warning = 'Redis/Valkey service is unavailable. Automatically switched to synchronous processing mode.';
+      }
+
+      res.json(response);
     });
-    
+
   } catch (error) {
     console.error('[Retrain] Error:', error);
     res.status(500).json({
@@ -134,16 +157,16 @@ router.get('/predictions/:retrainId', async (req, res) => {
     const path = require('path');
     const fs = require('fs');
     const { TRAINING_PATH } = require('../constants');
-    
+
     const predictionsFile = path.join(TRAINING_PATH, retrainId, 'predictions.csv');
-    
+
     if (!fs.existsSync(predictionsFile)) {
       return res.status(404).json({
         error: 'Predictions file not found',
         message: `No predictions file for retrain ID: ${retrainId}`
       });
     }
-    
+
     const predictionsData = fs.readFileSync(predictionsFile, 'utf8');
     res.type('text/plain').send(predictionsData);
   } catch (error) {
@@ -169,7 +192,7 @@ router.get('/job/:jobId', async (req, res) => {
       'Expires': '0',
       'Surrogate-Control': 'no-store'
     });
-    
+
     const { jobId } = req.params;
     const status = await getJobStatus(jobId, 'model-retraining');
     res.json(status);

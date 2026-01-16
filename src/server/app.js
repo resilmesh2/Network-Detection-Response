@@ -39,7 +39,6 @@ const SERVER_HOST = process.env.SERVER_HOST || '0.0.0.0';
 const SERVER_PORT = (process.env.SERVER_PORT && parseInt(process.env.SERVER_PORT, 10)) || derivedPort || 31057;
 const MODE = process.env.MODE || 'SERVER';
 
-const acRouter = require('./routes/ac');
 const mmtRouter = require('./routes/mmt');
 const pcapRouter = require('./routes/pcap');
 const reportRouter = require('./routes/report');
@@ -53,13 +52,27 @@ const xaiRouter = require('./routes/xai');
 const attacksRouter = require('./routes/attacks');
 const metricsRouter = require('./routes/metrics');
 const securityRouter = require('./routes/security');
-const onlineRouter = require('./routes/online');
 const assistantRouter = require('./routes/assistant');
 const featuresRouter = require('./routes/features');
 const queueRouter = require('./routes/queue');
-const earlyPredictionRouter = require('./routes/early-prediction');
 const dpiRouter = require('./routes/dpi');
 const networkRouter = require('./routes/network');
+
+// Handle unhandled promise rejections (e.g., Redis connection errors)
+process.on('unhandledRejection', (reason, promise) => {
+  // Suppress Redis connection errors - server continues in sync mode
+  if (reason && reason.message &&
+      (reason.message.includes('ECONNREFUSED') ||
+       reason.message.includes('Connection refused') ||
+       reason.message.includes("Stream isn't writeable") ||
+       reason.message.includes('enableOfflineQueue') ||
+       reason.message.includes('Redis'))) {
+    // Redis unavailable - already logged by queue initialization
+    return;
+  }
+  // Log other unhandled rejections
+  console.error('[Server] Unhandled Promise Rejection:', reason);
+});
 
 // Initialize queue workers (this starts all background workers)
 require('./queue/workers');
@@ -96,12 +109,12 @@ if (API_URL_STR) {
   try {
     const parsed = new URL(API_URL_STR);
     const baseOrigin = `${parsed.protocol}//${parsed.hostname}`;
-    
+
     // Add the base domain with common ports
     allowedOrigins.push(baseOrigin);
     allowedOrigins.push(`http://${parsed.hostname}:3000`);
     allowedOrigins.push(`https://${parsed.hostname}:3000`);
-    
+
     // If there's a port in the URL, add that too
     if (parsed.port) {
       allowedOrigins.push(`${parsed.protocol}//${parsed.hostname}:${parsed.port}`);
@@ -113,8 +126,6 @@ if (API_URL_STR) {
 
 // Remove duplicates
 const uniqueOrigins = [...new Set(allowedOrigins)];
-
-console.log('[CORS] Allowed origins:', uniqueOrigins);
 
 // Configure CORS with allowed origins
 app.use(cors({
@@ -142,14 +153,20 @@ app.use((req, res, next) => {
   next();
 }); */
 
-app.use(expressCspHeader({
-  policies: {
+// Apply CSP headers but exclude Swagger UI routes
+app.use((req, res, next) => {
+  // Skip CSP for Swagger UI to allow it to load properly
+  if (req.path.startsWith('/docs')) {
+    return next();
+  }
+  expressCspHeader({
+    policies: {
       'default-src': [expressCspHeader.NONE],
       'img-src': [expressCspHeader.SELF],
-  }
-}));
+    }
+  })(req, res, next);
+});
 
-app.use('/api/ac', acRouter);
 app.use('/api/mmt', mmtRouter);
 app.use('/api/pcaps', pcapRouter);
 app.use('/api/reports', reportRouter);
@@ -163,33 +180,42 @@ app.use('/api/xai', xaiRouter);
 app.use('/api/attacks', attacksRouter);
 app.use('/api/metrics', metricsRouter);
 app.use('/api/security', securityRouter);
-app.use('/api/online', onlineRouter);
 app.use('/api/assistant', assistantRouter);
 app.use('/api/features', featuresRouter);
 app.use('/api/queue', queueRouter);
-app.use('/api/early-prediction', earlyPredictionRouter);
 app.use('/api/dpi', dpiRouter);
 app.use('/api/network', networkRouter);
 
-// Serve early-prediction artifacts (figures and JSON) as static assets
-// Path: src/server/early-prediction/figures -> /static/early-prediction
-try {
-  const earlyPredFigures = path.join(__dirname, 'early-prediction', 'figures');
-  if (fs.existsSync(earlyPredFigures)) {
-    app.use('/static/early-prediction', express.static(earlyPredFigures));
-    console.log(`[STATIC] Early prediction assets served from ${earlyPredFigures} at /static/early-prediction`);
-  } else {
-    console.warn(`[STATIC] Early prediction figures directory not found: ${earlyPredFigures}`);
-  }
-} catch (e) {
-  console.warn('[STATIC] Failed to set up early prediction static route:', e.message || e);
-}
+// Swagger API documentation - available in all modes at /docs
+app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    mode: MODE
+  });
+});
 
 if (MODE === 'SERVER') {
-  app.use(express.static(path.join(__dirname, '../public')));
-  app.get('/*', function (req, res) {
-    res.sendFile(path.join(__dirname, '../public', 'index.html'));
-  });
+  // Check if public/index.html exists and is a real client app
+  const publicIndexPath = path.join(__dirname, '../public', 'index.html');
+  const hasClientApp = fs.existsSync(publicIndexPath) &&
+    fs.statSync(publicIndexPath).size > 1000; // Real React app is larger
+
+  if (hasClientApp) {
+    app.use(express.static(path.join(__dirname, '../public')));
+    app.get('/*', function (req, res) {
+      res.sendFile(publicIndexPath);
+    });
+  } else {
+    // No client app - redirect root to API docs
+    app.get('/', (req, res) => {
+      res.redirect('/docs');
+    });
+  }
 } else if (MODE === 'API') {
   // start Swagger API server
   app.use('/', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
@@ -203,19 +229,13 @@ let server;
 if (PROTOCOL === 'HTTP') {
   server = app.listen(SERVER_PORT, SERVER_HOST, () => {
     console.log(`[HTTP SERVER] NDR server started on http://${SERVER_HOST}:${SERVER_PORT}`);
-    
+
     // Start periodic cleanup of all sessions (every 15 minutes)
     const sessionManager = require('./utils/sessionManager');
-    
+
     setInterval(() => {
-      console.log('[SessionManager] Running periodic cleanup for all session types...');
-      const cleaned = sessionManager.cleanupOldSessions();
-      if (cleaned === 0) {
-        console.log('[SessionManager] No old sessions to clean up');
-      }
+      sessionManager.cleanupOldSessions();
     }, 15 * 60 * 1000); // 15 minutes
-    
-    console.log('[SessionManager] Periodic cleanup scheduled (every 15 minutes) for all session types (DPI, Prediction, XAI, Attacks)');
   });
 }
 
