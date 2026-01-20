@@ -1,50 +1,28 @@
 FROM ubuntu:20.04
 ARG DEBIAN_FRONTEND=noninteractive
 
-# System dependencies
+# 1. dependences of the system
 RUN apt-get update -y && apt-get install -y \
-    git \
-    wget \
-    cmake \
-    gcc \
-    g++ \
-    cpp \
-    curl \
-    software-properties-common \
-    graphviz \
-    libconfuse-dev \
-    libpcap-dev \
-    libxml2-dev \
-    net-tools \
-    libcap2-bin \
-    sudo \
-    psmisc \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Python 3.8 (included in Ubuntu 20.04 by default)
-RUN apt-get update -y && \
-    apt-get install python3.8 python3.8-venv python3.8-dev -y && \
+    git wget cmake gcc g++ cpp curl software-properties-common \
+    graphviz libconfuse-dev libpcap-dev libxml2-dev net-tools \
+    libcap2-bin sudo psmisc ca-certificates gnupg \
+    python3.8 python3.8-venv python3.8-dev python3-pip && \
     rm -rf /var/lib/apt/lists/*
 
-# Install specific pip version
-RUN curl https://bootstrap.pypa.io/pip/3.8/get-pip.py -o get-pip.py && \
-    python3.8 get-pip.py pip==20.0.2
-
-# Install NodeJS
-RUN curl -sL https://deb.nodesource.com/setup_19.x | bash && \
-    apt-get install -y nodejs && \
+# 2. Configuration Node.js 20.x (LTS)
+RUN mkdir -p /etc/apt/keyrings && \
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list && \
+    apt-get update && apt-get install -y nodejs && \
     npm install pm2 -g && \
     rm -rf /var/lib/apt/lists/*
 
-# Create app directory and set working directory
 WORKDIR /ndr-app
 
-# Copy only requirements file first
+# 3. Python dependencies installation
 COPY src/server/deep-learning/requirements.txt ./src/server/deep-learning/
-
-# Install Python dependencies
 RUN python3.8 -m pip install --upgrade pip && \
-    pip3 install --no-cache-dir -r src/server/deep-learning/requirements.txt
+    python3.8 -m pip install --no-cache-dir -r src/server/deep-learning/requirements.txt
 
 # Copy package.json and package-lock.json
 COPY package*.json ./
