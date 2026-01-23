@@ -15,7 +15,7 @@ git checkout "$LATEST_TAG"
 cp env.example .env
 
 # (Optional) Edit .env if you need to customize:
-# - NATS_URL: If using NATS messaging (default: nats://nats:4222)
+# - NATS_URL: If using NATS messaging (default: nats://resilmesh-ap-nats:4222)
 # - NATS_SUBJECT: Topic for publishing data
 # - REACT_APP_API_URL: If accessing from other machines (default: http://localhost:31057)
 
