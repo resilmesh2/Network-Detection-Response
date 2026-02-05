@@ -855,8 +855,8 @@ const LABEL_MAPPING_AD = {
 };
 
 // File upload constraints
-// Read from environment variable (must be set before build) or default to 20 MB
-const MAX_PCAP_SIZE_BYTES = parseInt(process.env.REACT_APP_MAX_PCAP_SIZE) || (20 * 1024 * 1024);
+// Read from environment variable (must be set before build) or default to 200 MB
+const MAX_PCAP_SIZE_BYTES = parseInt(process.env.REACT_APP_MAX_PCAP_SIZE) || (200 * 1024 * 1024);
 const MAX_PCAP_SIZE_MB = MAX_PCAP_SIZE_BYTES / (1024 * 1024);
 
 export {
