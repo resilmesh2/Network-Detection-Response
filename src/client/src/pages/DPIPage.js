@@ -525,16 +525,17 @@ class DPIPage extends Component {
         const errorData = await response.json();
         console.error('[DPI Frontend] Error response:', errorData);
         
-        // If it's a "waiting for data" error in online mode, auto-retry after a delay
-        if (this.state.mode === 'online' && 
-            (errorData.error.includes('waiting') || 
-             errorData.error.includes('empty') || 
-             errorData.error.includes('No CSV'))) {
-          console.log('[DPI Frontend] Auto-retrying in 3 seconds...');
-          // Don't show error for initial data wait in online mode
+        // If it's a "waiting for data" error (CSV not ready yet), auto-retry after a delay
+        // This applies to both online and offline modes during initial processing
+        if (errorData.error.includes('waiting') || 
+            errorData.error.includes('empty') || 
+            errorData.error.includes('No CSV') ||
+            errorData.error.includes('Output directory not found')) {
+          console.log('[DPI Frontend] Data not ready yet, auto-retrying in 3 seconds...');
+          // Don't show error for initial data wait - only show if we have no data yet
           if (!this.state.hierarchyData || this.state.hierarchyData.length === 0) {
             this.setState({ 
-              error: errorData.error + ' (auto-retrying...)',
+              error: null, // Don't show error during initial processing
               loading: false 
             });
           }
