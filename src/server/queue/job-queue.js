@@ -60,7 +60,18 @@ let REDIS_AVAILABLE = false;
 
 try {
   // Create queues for different job types
-  featureQueue = new Queue('feature-extraction', REDIS_URL, baseQueueOptions);
+  featureQueue = new Queue('feature-extraction', REDIS_URL, {
+    ...baseQueueOptions,
+    defaultJobOptions: {
+      ...baseQueueOptions.defaultJobOptions,
+      timeout: 20 * 60 * 1000 // 20 minutes timeout for large PCAP files
+    },
+    settings: {
+      lockDuration: 20 * 60 * 1000, // 20 minutes lock
+      stalledInterval: 10 * 60 * 1000, // Check for stalled jobs every 10 minutes
+      maxStalledCount: 2
+    }
+  });
 
   trainingQueue = new Queue('model-training', REDIS_URL, {
     ...baseQueueOptions,

@@ -461,8 +461,13 @@ function calculateTrafficStatistics(hierarchy, trafficTimeSeries, isOnlineMode =
   if (trafficTimeSeries && trafficTimeSeries.length > 0) {
     const timestamps = trafficTimeSeries.map(t => t.timestamp).filter(t => t && !isNaN(t));
     if (timestamps.length > 0) {
-      const currentStartTime = Math.min(...timestamps);
-      const currentEndTime = Math.max(...timestamps);
+      // Use loop instead of spread operator to avoid stack overflow with large arrays
+      let currentStartTime = timestamps[0];
+      let currentEndTime = timestamps[0];
+      for (let i = 1; i < timestamps.length; i++) {
+        if (timestamps[i] < currentStartTime) currentStartTime = timestamps[i];
+        if (timestamps[i] > currentEndTime) currentEndTime = timestamps[i];
+      }
 
       if (isOnlineMode && dpiState.cumulativeStatistics) {
         // Keep the earliest start time and latest end time
