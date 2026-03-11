@@ -44,6 +44,7 @@ const { listFilesByTypeAsync, createFolderSync, writeTextFile, isFileExistSync }
 const { spawnCommand, getUniqueId } = require('../utils/utils');
 const { startMMTOffline, getMMTStatus } = require('../mmt/mmt-connector');
 const { resolvePcapPath } = require('../utils/pcapResolver');
+const { ensureEthernetPcap } = require('../utils/pcapConverter');
 const {
   performPoisoningCTGAN,
   performPoisoningRSL,
@@ -554,9 +555,29 @@ ruleBasedQueue.process('detect', CONCURRENCY.ruleBasedDetection, async (job) => 
     const SECURITY_OUT_DIR = path.join(__dirname, '../mmt/outputs');
     const outDir = path.join(SECURITY_OUT_DIR, `offline-${sessionId}`);
     fs.mkdirSync(outDir, { recursive: true, mode: 0o777 });
-    
+
     await job.progress(10);
-    
+
+    // Auto-detect and convert LINUX_SLL PCAPs to Ethernet so mmt_security can
+    // inspect TCP/UDP attributes (rules 110–117 and any port/payload rules).
+    const pcapSizeMB = (fs.statSync(inputPath).size / 1024 / 1024).toFixed(1);
+    console.log(`[Worker][pcap-preprocess] Checking link-layer type for ${path.basename(inputPath)} (${pcapSizeMB} MB)...`);
+    const preprocessStart = Date.now();
+    try {
+      const pcapResult = await ensureEthernetPcap(inputPath, outDir);
+      const preprocessMs = Date.now() - preprocessStart;
+      if (pcapResult.converted) {
+        const convertedSizeMB = (fs.statSync(pcapResult.path).size / 1024 / 1024).toFixed(1);
+        console.log(`[Worker][pcap-preprocess] LINUX_SLL (link-type ${pcapResult.linkType}) detected — converted to Ethernet in ${preprocessMs} ms (${convertedSizeMB} MB) → ${path.basename(pcapResult.path)}`);
+        inputPath = pcapResult.path;
+      } else {
+        console.log(`[Worker][pcap-preprocess] Link-type ${pcapResult.linkType} (Ethernet/other) — no conversion needed (${preprocessMs} ms)`);
+      }
+    } catch (convErr) {
+      const preprocessMs = Date.now() - preprocessStart;
+      console.warn(`[Worker][pcap-preprocess] Conversion failed after ${preprocessMs} ms — continuing with original PCAP: ${convErr.message}`);
+    }
+
     // Resolve mmt_security binary
     const resolveSecurityBin = () => {
       const candidates = [
@@ -582,13 +603,16 @@ ruleBasedQueue.process('detect', CONCURRENCY.ruleBasedDetection, async (job) => 
     args.push('-f', `${outDir}/`);
     
     const cmd = `${bin} ${args.map(a => (a.includes(' ') ? `"${a}"` : a)).join(' ')}`;
-    logInfo(`[Worker] Executing rule-based detection: ${cmd}`);
-    
+    console.log(`[Worker][mmt_security] Starting: ${cmd}`);
+
     await job.progress(20);
-    
+
     // Execute mmt_security
+    const mmtStart = Date.now();
     const { stdout, stderr } = await execAsync(cmd);
-    
+    const mmtMs = Date.now() - mmtStart;
+    console.log(`[Worker][mmt_security] Completed in ${(mmtMs / 1000).toFixed(1)} s`);
+
     await job.progress(80);
     
     // Find latest CSV file
