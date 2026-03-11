@@ -24,6 +24,7 @@ const sessionManager = require('../utils/sessionManager');
 // Import queue functions
 const { queueRuleBasedDetection, getJobStatus } = require('../queue/job-queue');
 const { handleQueueError, isRedisError } = require('../utils/queueErrorHelper');
+const { ensureEthernetPcap } = require('../utils/pcapConverter');
 
 // Default to sudo unless explicitly disabled; use non-interactive to avoid blocking
 const SUDO = USE_SUDO === 'false' ? '' : 'sudo -n ';
@@ -662,7 +663,7 @@ router.post('/rule-based/offline', async (req, res) => {
       });
 
       // Poll for job completion
-      const maxWaitTime = 5 * 60 * 1000; // 5 minutes max
+      const maxWaitTime = 10 * 60 * 1000; // 10 minutes max
       const pollInterval = 2000; // 2 seconds
       const startTime = Date.now();
 
@@ -721,6 +722,27 @@ router.post('/rule-based/offline', async (req, res) => {
 
     const outDir = path.join(SECURITY_OUT_DIR, `offline-${sessionId}`);
     ensureDir(outDir);
+
+    // Auto-detect and convert LINUX_SLL PCAPs to Ethernet so mmt_security can
+    // inspect TCP/UDP attributes (rules 110–117 and any port/payload rules).
+    const pcapSizeMB = (fs.statSync(inputPath).size / 1024 / 1024).toFixed(1);
+    console.log(`[SECURITY][pcap-preprocess] Checking link-layer type for ${path.basename(inputPath)} (${pcapSizeMB} MB)...`);
+    const preprocessStart = Date.now();
+    try {
+      const pcapResult = await ensureEthernetPcap(inputPath, outDir);
+      const preprocessMs = Date.now() - preprocessStart;
+      if (pcapResult.converted) {
+        const convertedSizeMB = (fs.statSync(pcapResult.path).size / 1024 / 1024).toFixed(1);
+        console.log(`[SECURITY][pcap-preprocess] LINUX_SLL (link-type ${pcapResult.linkType}) detected — converted to Ethernet in ${preprocessMs} ms (${convertedSizeMB} MB) → ${path.basename(pcapResult.path)}`);
+        inputPath = pcapResult.path;
+      } else {
+        console.log(`[SECURITY][pcap-preprocess] Link-type ${pcapResult.linkType} (Ethernet/other) — no conversion needed (${preprocessMs} ms)`);
+      }
+    } catch (convErr) {
+      const preprocessMs = Date.now() - preprocessStart;
+      console.warn(`[SECURITY][pcap-preprocess] Conversion failed after ${preprocessMs} ms — continuing with original PCAP: ${convErr.message}`);
+    }
+
     const bin = resolveSecurityBin();
 
     const args = [];

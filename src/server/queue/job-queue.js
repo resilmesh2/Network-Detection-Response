@@ -97,7 +97,13 @@ try {
       backoff: {
         type: 'exponential',
         delay: 2000
-      }
+      },
+      timeout: 10 * 60 * 1000 // 10 minutes timeout for large PCAP files
+    },
+    settings: {
+      lockDuration: 10 * 60 * 1000, // 10 minutes lock
+      stalledInterval: 5 * 60 * 1000,
+      maxStalledCount: 2
     }
   });
 
@@ -288,7 +294,7 @@ const queuePrediction = async (data) => {
 const queueRuleBasedDetection = async (data) => {
   const job = await ruleBasedQueue.add('detect', data, {
     priority: data.priority || 5,
-    timeout: 5 * 60 * 1000 // 5 minutes timeout
+    timeout: 10 * 60 * 1000 // 10 minutes timeout for large PCAP files
   });
 
   let position = 0;

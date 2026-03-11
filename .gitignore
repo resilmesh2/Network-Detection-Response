@@ -1,19 +1,42 @@
-node_modules
+# Dependencies
+node_modules/
+
+# Python
 venv/
-.vscode/
-*.backup
-*.pdf
-*.log
-*.DS_Store
-*.pem
+venv-agent/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+
+# Environment & secrets
 .env
-src/server/logs/*.log
-src/server/deep-learning/__pycache__/
-src/server/mmt/outputs/*
+*.pem
+
+# Editor
+.vscode/
+.idea/
+
+# OS
+*.DS_Store
+
+# Logs & backups
+*.log
+*.backup
+src/server/logs/
+
+# Build output
 src/client/build/
-src/server/deep-learning/attacks/*
-src/server/deep-learning/trainings/*
-src/server/deep-learning/xai/*
-src/server/deep-learning/predictions/*
-src/server/mmt/pcaps/*
-src/public
+src/public/
+
+# MMT runtime data
+src/server/mmt/outputs/
+src/server/mmt/pcaps/
+
+# Deep-learning runtime data
+src/server/deep-learning/attacks/
+src/server/deep-learning/trainings/
+src/server/deep-learning/xai/
+src/server/deep-learning/predictions/
+
+# PCAP samples (large binary files)
+pcaps/
