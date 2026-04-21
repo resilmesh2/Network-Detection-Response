@@ -483,6 +483,36 @@ export function handleMitigationAction({ actionKey, srcIp, dstIp, sessionId, dpo
         message.warning('Missing src IP or port for rate limit');
       }
       break;
+    case 'send-nats':
+      showNatsConfigModal()
+        .then(async (config) => {
+          try {
+            const { natsUrl, subject, username, password } = config || {};
+            const payload = { ...flowRecord };
+            delete payload.key;
+            const res = await fetch(`${SERVER_URL}/api/security/nats-publish/bulk`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                payloads: [payload],
+                natsUrl: natsUrl || undefined,
+                subject: subject || undefined,
+                username: username || undefined,
+                password: password || undefined,
+              }),
+            });
+            if (!res.ok) throw new Error(await res.text());
+            notification.success({ message: 'Sent to NATS', description: `Alert published to ${subject || 'server default subject'}`, placement: 'topRight' });
+          } catch (e) {
+            notification.error({ message: 'NATS publish failed', description: e.message, placement: 'topRight' });
+          }
+        })
+        .catch((err) => {
+          if (err.message !== 'Cancelled') {
+            message.error('Failed to get NATS configuration');
+          }
+        });
+      break;
     default:
       message.info('Action not recognized');
   }
