@@ -2764,9 +2764,9 @@ class DPIPage extends Component {
                   disabled={isRunning}
                 >
                   <Option value="offline">Offline (PCAP)</Option>
-                  <Option value="online" disabled={!this.props.canPerformOnlineActions}>
-                    <Tooltip title={!this.props.canPerformOnlineActions ? "Admin access required" : ""}>
-                      Online (Interface) {!this.props.canPerformOnlineActions && <LockOutlined />}
+                  <Option value="online" disabled>
+                    <Tooltip title="Online mode is currently disabled">
+                      Online (Interface) <LockOutlined />
                     </Tooltip>
                   </Option>
                 </Select>
