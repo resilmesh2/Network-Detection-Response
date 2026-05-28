@@ -55,26 +55,27 @@ async function callAnthropic({ apiKey, model, system, user, temperature, max_tok
   return { text, provider: 'anthropic', model: mdl, usage: { inputTokens: u.input_tokens, outputTokens: u.output_tokens } };
 }
 
-// Resolve provider + key + model: per-request body overrides server env. The key
-// is used only to call the provider; it is never stored or logged.
-function resolveLLM(req) {
-  const b = req.body || {};
-  const provider = String(b.provider || process.env.LLM_PROVIDER || 'openai').toLowerCase();
-  const apiKey = b.apiKey || (provider === 'anthropic' ? process.env.ANTHROPIC_API_KEY : process.env.OPENAI_API_KEY);
-  const model = b.model || (provider === 'anthropic' ? process.env.ANTHROPIC_MODEL : process.env.OPENAI_MODEL);
-  return { provider, apiKey, model };
+// Pick the provider from whichever key is set in the server .env.
+// OpenAI wins when both are present; Anthropic is used when it's the only one.
+function resolveLLM() {
+  if (process.env.OPENAI_API_KEY) {
+    return { provider: 'openai', apiKey: process.env.OPENAI_API_KEY, model: process.env.OPENAI_MODEL };
+  }
+  if (process.env.ANTHROPIC_API_KEY) {
+    return { provider: 'anthropic', apiKey: process.env.ANTHROPIC_API_KEY, model: process.env.ANTHROPIC_MODEL };
+  }
+  return { provider: null, apiKey: null, model: null };
 }
 
-async function callLLM(req, { system, user, temperature = 0.2, max_tokens = 350 }) {
-  const { provider, apiKey, model } = resolveLLM(req);
+async function callLLM({ system, user, temperature = 0.2, max_tokens = 350 }) {
+  const { provider, apiKey, model } = resolveLLM();
   if (!apiKey) {
-    const err = new Error(`No ${provider} API key configured. Add your key via "Assistant key" (top right), or set the server env var.`);
+    const err = new Error('No assistant API key configured. Set OPENAI_API_KEY or ANTHROPIC_API_KEY in .env and restart the server.');
     err.status = 400;
     throw err;
   }
   if (provider === 'anthropic') return callAnthropic({ apiKey, model, system, user, temperature, max_tokens });
-  if (provider === 'openai') return callOpenAI({ apiKey, model, system, user, temperature, max_tokens });
-  const err = new Error(`Unsupported provider: ${provider}`); err.status = 400; throw err;
+  return callOpenAI({ apiKey, model, system, user, temperature, max_tokens });
 }
 
 function trimRecord(record, limit = 40) {
@@ -103,7 +104,7 @@ function buildSystemPrompt({ includeMitigations = true } = {}) {
 }
 
 // POST /api/assistant/explain/flow
-// Body: { flowRecord, modelId, predictionId?, extra?, provider?, apiKey?, model? }
+// Body: { flowRecord, modelId, predictionId?, extra? }
 router.post('/explain/flow', async (req, res) => {
   try {
     const { flowRecord, modelId, predictionId, extra = {} } = req.body || {};
@@ -112,7 +113,7 @@ router.post('/explain/flow', async (req, res) => {
     }
     const trimmed = trimRecord(flowRecord);
     const user = `Model: ${modelId}\nPrediction ID: ${predictionId || 'N/A'}\nFlow features (subset):\n${JSON.stringify(trimmed, null, 2)}\n\nAdditional context:\n${JSON.stringify(extra, null, 2)}\n\nTask:\n- Explain in 3 brief bullets why this flow may be malicious.\n- Summarize in 1 bullet which features likely contributed most.\n- Provide 3 concise mitigation bullets (playbook-style).\n- Keep under ~220 words, but ensure complete sentences (do not cut off mid-sentence).`;
-    const result = await callLLM(req, { system: buildSystemPrompt({ includeMitigations: true }), user, max_tokens: 320 });
+    const result = await callLLM({ system: buildSystemPrompt({ includeMitigations: true }), user, max_tokens: 320 });
     res.send({ text: result.text, provider: result.provider, model: result.model, usage: result.usage });
   } catch (e) {
     console.error('[Assistant] Error in /explain/flow:', e.message);
@@ -121,7 +122,7 @@ router.post('/explain/flow', async (req, res) => {
 });
 
 // POST /api/assistant/explain/xai
-// Body: { method: 'shap'|'lime', modelId, label?, explanation, context?, provider?, apiKey?, model? }
+// Body: { method: 'shap'|'lime', modelId, label?, explanation, context? }
 router.post('/explain/xai', async (req, res) => {
   try {
     const { method, modelId, label, explanation, context = {} } = req.body || {};
@@ -130,7 +131,7 @@ router.post('/explain/xai', async (req, res) => {
     }
     const topItems = explanation.slice(0, 30);
     const user = `Model: ${modelId}\nMethod: ${method}\nLabel: ${label || 'N/A'}\nTop explanation items (truncated):\n${JSON.stringify(topItems, null, 2)}\n\nContext:\n${JSON.stringify(context, null, 2)}\n\nTask:\n- Explain the XAI output (what the features indicate) in simple, brief bullet points.\n- Do not include any mitigation steps or recommendations.\n- Keep under ~120 words.`;
-    const result = await callLLM(req, { system: buildSystemPrompt({ includeMitigations: false }), user, max_tokens: 200 });
+    const result = await callLLM({ system: buildSystemPrompt({ includeMitigations: false }), user, max_tokens: 200 });
     res.send({ text: result.text, provider: result.provider, model: result.model, usage: result.usage });
   } catch (e) {
     console.error('[Assistant] Error in /explain/xai:', e.message);

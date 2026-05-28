@@ -2,7 +2,6 @@ import {
   getLabelsListXAI,
 } from "../utils";
 import { fetchWithAuth } from '../utils/fetchWithAuth';
-import { assistantConfigBody } from '../utils/assistantKey';
 
 const {
   SERVER_URL,
@@ -782,7 +781,7 @@ export const requestPredictionAttack = async (predictionId) => {
 // Assistant API: Explain a malicious flow using GPT
 export const requestAssistantExplainFlow = async ({ flowRecord, modelId, predictionId, extra, userId, isAdmin }) => {
   const url = `${ASSISTANT_URL}/explain/flow`;
-  const body = { flowRecord, modelId, predictionId, extra, ...assistantConfigBody() };
+  const body = { flowRecord, modelId, predictionId, extra };
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -987,7 +986,7 @@ export const requestExtractFeatures = async ({ pcapFile, isMalicious, userRole }
 // Assistant API: Explain XAI output (LIME/SHAP) using GPT
 export const requestAssistantExplainXAI = async ({ method, modelId, label, explanation, context, userId, isAdmin }) => {
   const url = `${ASSISTANT_URL}/explain/xai`;
-  const body = { method, modelId, label, explanation, context, ...assistantConfigBody() };
+  const body = { method, modelId, label, explanation, context };
   const response = await fetch(url, {
     method: 'POST',
     headers: {
