@@ -2,54 +2,79 @@ const express = require('express');
 const router = express.Router();
 const https = require('https');
 
-// Helper to call OpenAI Chat Completions API
-async function callOpenAIChat({ model, messages, temperature = 0.2, max_tokens = 350 }) {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    throw new Error('Missing OPENAI_API_KEY environment variable');
-  }
-
-  const payload = JSON.stringify({
-    model: model || process.env.OPENAI_MODEL || 'gpt-4o-mini',
-    temperature,
-    max_tokens,
-    messages,
-  });
-
-  const options = {
-    hostname: 'api.openai.com',
-    path: '/v1/chat/completions',
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Length': Buffer.byteLength(payload),
-    },
-  };
-
+// Low-level HTTPS JSON POST. Never logs headers/body (they carry the API key).
+function postJson({ hostname, path, headers, payload }) {
   return new Promise((resolve, reject) => {
-    const req = https.request(options, (res) => {
+    const req = https.request({ hostname, path, method: 'POST', headers }, (res) => {
       let data = '';
-      res.on('data', (chunk) => { data += chunk; });
+      res.on('data', (c) => { data += c; });
       res.on('end', () => {
-        try {
-          const json = JSON.parse(data);
-          if (res.statusCode >= 200 && res.statusCode < 300) {
-            const text = json.choices?.[0]?.message?.content || '';
-            const usage = json.usage; // { prompt_tokens, completion_tokens, total_tokens }
-            resolve({ raw: json, text, usage, provider: 'openai', model: model || process.env.OPENAI_MODEL || 'gpt-4o-mini' });
-          } else {
-            reject(new Error(json.error?.message || `OpenAI API error: HTTP ${res.statusCode}`));
-          }
-        } catch (e) {
-          reject(e);
-        }
+        let json;
+        try { json = JSON.parse(data); } catch (e) { return reject(new Error(`Invalid response (HTTP ${res.statusCode})`)); }
+        resolve({ statusCode: res.statusCode, json });
       });
     });
-    req.on('error', (e) => reject(e));
+    req.on('error', reject);
     req.write(payload);
     req.end();
   });
+}
+
+// OpenAI Chat Completions
+async function callOpenAI({ apiKey, model, system, user, temperature, max_tokens }) {
+  const mdl = model || process.env.OPENAI_MODEL || 'gpt-4o-mini';
+  const payload = JSON.stringify({
+    model: mdl, temperature, max_tokens,
+    messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+  });
+  const { statusCode, json } = await postJson({
+    hostname: 'api.openai.com', path: '/v1/chat/completions',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}`, 'Content-Length': Buffer.byteLength(payload) },
+    payload,
+  });
+  if (statusCode < 200 || statusCode >= 300) throw new Error(json.error?.message || `OpenAI API error: HTTP ${statusCode}`);
+  const u = json.usage || {};
+  return { text: json.choices?.[0]?.message?.content || '', provider: 'openai', model: mdl, usage: { inputTokens: u.prompt_tokens, outputTokens: u.completion_tokens } };
+}
+
+// Anthropic Messages API (system is a top-level field; messages hold only user/assistant turns)
+async function callAnthropic({ apiKey, model, system, user, temperature, max_tokens }) {
+  const mdl = model || process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5';
+  const body = { model: mdl, max_tokens, system, messages: [{ role: 'user', content: user }] };
+  // Opus 4.7 rejects temperature; every other current model accepts it.
+  if (!/opus-4-7/.test(mdl)) body.temperature = temperature;
+  const payload = JSON.stringify(body);
+  const { statusCode, json } = await postJson({
+    hostname: 'api.anthropic.com', path: '/v1/messages',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(payload) },
+    payload,
+  });
+  if (statusCode < 200 || statusCode >= 300) throw new Error(json.error?.message || `Anthropic API error: HTTP ${statusCode}`);
+  const u = json.usage || {};
+  const text = Array.isArray(json.content) ? json.content.filter(b => b.type === 'text').map(b => b.text).join('') : '';
+  return { text, provider: 'anthropic', model: mdl, usage: { inputTokens: u.input_tokens, outputTokens: u.output_tokens } };
+}
+
+// Resolve provider + key + model: per-request body overrides server env. The key
+// is used only to call the provider; it is never stored or logged.
+function resolveLLM(req) {
+  const b = req.body || {};
+  const provider = String(b.provider || process.env.LLM_PROVIDER || 'openai').toLowerCase();
+  const apiKey = b.apiKey || (provider === 'anthropic' ? process.env.ANTHROPIC_API_KEY : process.env.OPENAI_API_KEY);
+  const model = b.model || (provider === 'anthropic' ? process.env.ANTHROPIC_MODEL : process.env.OPENAI_MODEL);
+  return { provider, apiKey, model };
+}
+
+async function callLLM(req, { system, user, temperature = 0.2, max_tokens = 350 }) {
+  const { provider, apiKey, model } = resolveLLM(req);
+  if (!apiKey) {
+    const err = new Error(`No ${provider} API key configured. Add your key via "Assistant key" (top right), or set the server env var.`);
+    err.status = 400;
+    throw err;
+  }
+  if (provider === 'anthropic') return callAnthropic({ apiKey, model, system, user, temperature, max_tokens });
+  if (provider === 'openai') return callOpenAI({ apiKey, model, system, user, temperature, max_tokens });
+  const err = new Error(`Unsupported provider: ${provider}`); err.status = 400; throw err;
 }
 
 function trimRecord(record, limit = 40) {
@@ -78,7 +103,7 @@ function buildSystemPrompt({ includeMitigations = true } = {}) {
 }
 
 // POST /api/assistant/explain/flow
-// Body: { flowRecord, modelId, predictionId?, extra?: { probs?, shapValues?, limeValues? } }
+// Body: { flowRecord, modelId, predictionId?, extra?, provider?, apiKey?, model? }
 router.post('/explain/flow', async (req, res) => {
   try {
     const { flowRecord, modelId, predictionId, extra = {} } = req.body || {};
@@ -86,47 +111,30 @@ router.post('/explain/flow', async (req, res) => {
       return res.status(400).send({ error: 'Missing required fields: flowRecord, modelId' });
     }
     const trimmed = trimRecord(flowRecord);
-    const messages = [
-      { role: 'system', content: buildSystemPrompt({ includeMitigations: true }) },
-      { role: 'user', content: `Model: ${modelId}\nPrediction ID: ${predictionId || 'N/A'}\nFlow features (subset):\n${JSON.stringify(trimmed, null, 2)}\n\nAdditional context:\n${JSON.stringify(extra, null, 2)}\n\nTask:\n- Explain in 3 brief bullets why this flow may be malicious.\n- Summarize in 1 bullet which features likely contributed most.\n- Provide 3 concise mitigation bullets (playbook-style).\n- Keep under ~220 words, but ensure complete sentences (do not cut off mid-sentence).` },
-    ];
-    const result = await callOpenAIChat({ messages, max_tokens: 320 });
-
-    res.send({
-      text: result.text,
-      provider: result.provider,
-      model: result.model
-    });
+    const user = `Model: ${modelId}\nPrediction ID: ${predictionId || 'N/A'}\nFlow features (subset):\n${JSON.stringify(trimmed, null, 2)}\n\nAdditional context:\n${JSON.stringify(extra, null, 2)}\n\nTask:\n- Explain in 3 brief bullets why this flow may be malicious.\n- Summarize in 1 bullet which features likely contributed most.\n- Provide 3 concise mitigation bullets (playbook-style).\n- Keep under ~220 words, but ensure complete sentences (do not cut off mid-sentence).`;
+    const result = await callLLM(req, { system: buildSystemPrompt({ includeMitigations: true }), user, max_tokens: 320 });
+    res.send({ text: result.text, provider: result.provider, model: result.model, usage: result.usage });
   } catch (e) {
-    console.error('[Assistant] Error in /explain/flow:', e);
-    res.status(500).send({ error: e.message || String(e) });
+    console.error('[Assistant] Error in /explain/flow:', e.message);
+    res.status(e.status || 500).send({ error: e.message || String(e) });
   }
 });
 
 // POST /api/assistant/explain/xai
-// Body: { method: 'shap'|'lime', modelId, label?, explanation, context? }
+// Body: { method: 'shap'|'lime', modelId, label?, explanation, context?, provider?, apiKey?, model? }
 router.post('/explain/xai', async (req, res) => {
   try {
     const { method, modelId, label, explanation, context = {} } = req.body || {};
     if (!method || !modelId || !Array.isArray(explanation)) {
       return res.status(400).send({ error: 'Missing required fields: method, modelId, explanation[]' });
     }
-    // Only keep top 30 items to limit prompt size
     const topItems = explanation.slice(0, 30);
-    const messages = [
-      { role: 'system', content: buildSystemPrompt({ includeMitigations: false }) },
-      { role: 'user', content: `Model: ${modelId}\nMethod: ${method}\nLabel: ${label || 'N/A'}\nTop explanation items (truncated):\n${JSON.stringify(topItems, null, 2)}\n\nContext:\n${JSON.stringify(context, null, 2)}\n\nTask:\n- Explain the XAI output (what the features indicate) in simple, brief bullet points.\n- Do not include any mitigation steps or recommendations.\n- Keep under ~120 words.` },
-    ];
-    const result = await callOpenAIChat({ messages, max_tokens: 200 });
-
-    res.send({
-      text: result.text,
-      provider: result.provider,
-      model: result.model
-    });
+    const user = `Model: ${modelId}\nMethod: ${method}\nLabel: ${label || 'N/A'}\nTop explanation items (truncated):\n${JSON.stringify(topItems, null, 2)}\n\nContext:\n${JSON.stringify(context, null, 2)}\n\nTask:\n- Explain the XAI output (what the features indicate) in simple, brief bullet points.\n- Do not include any mitigation steps or recommendations.\n- Keep under ~120 words.`;
+    const result = await callLLM(req, { system: buildSystemPrompt({ includeMitigations: false }), user, max_tokens: 200 });
+    res.send({ text: result.text, provider: result.provider, model: result.model, usage: result.usage });
   } catch (e) {
-    console.error('[Assistant] Error in /explain/xai:', e);
-    res.status(500).send({ error: e.message || String(e) });
+    console.error('[Assistant] Error in /explain/xai:', e.message);
+    res.status(e.status || 500).send({ error: e.message || String(e) });
   }
 });
 

@@ -2,6 +2,7 @@ import {
   getLabelsListXAI,
 } from "../utils";
 import { fetchWithAuth } from '../utils/fetchWithAuth';
+import { assistantConfigBody } from '../utils/assistantKey';
 
 const {
   SERVER_URL,
@@ -781,7 +782,7 @@ export const requestPredictionAttack = async (predictionId) => {
 // Assistant API: Explain a malicious flow using GPT
 export const requestAssistantExplainFlow = async ({ flowRecord, modelId, predictionId, extra, userId, isAdmin }) => {
   const url = `${ASSISTANT_URL}/explain/flow`;
-  const body = { flowRecord, modelId, predictionId, extra };
+  const body = { flowRecord, modelId, predictionId, extra, ...assistantConfigBody() };
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -792,7 +793,8 @@ export const requestAssistantExplainFlow = async ({ flowRecord, modelId, predict
     body: JSON.stringify(body),
   });
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    const err = await response.json().catch(() => null);
+    throw new Error(err?.error || `HTTP ${response.status}: ${response.statusText}`);
   }
   return response.json();
 };
@@ -816,6 +818,55 @@ export const requestRuleAlerts = async (limit = 500, sessionId) => {
   const res = await fetch(url);
   if (!res.ok) throw new Error(await res.text());
   return res.json(); // { ok, file, count, alerts }
+};
+
+// List the available mmt-security rules (catalog for the selection table)
+export const requestRuleList = async ({ refresh = false } = {}) => {
+  const url = `${SERVER_URL}/api/security/rule-based/rules${refresh ? '?refresh=true' : ''}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json(); // { ok, rules: [{ id, type, description, events, hasXml }] }
+};
+
+// Fetch the raw XML source of a single rule
+export const requestRuleXml = async (id) => {
+  const res = await fetch(`${SERVER_URL}/api/security/rule-based/rules/${encodeURIComponent(id)}/xml`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.text();
+};
+
+// Upload a new rule (admin). Server compiles/validates before accepting.
+export const requestRuleUpload = async ({ filename, xml, userRole } = {}) => {
+  const { fetchWithAuth } = require('../utils/fetchWithAuth');
+  const res = await fetchWithAuth(`${SERVER_URL}/api/security/rule-based/rules`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ filename, xml }),
+  }, userRole);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json(); // { ok, id, rules }
+};
+
+// Edit a user-added rule's XML (admin). Server recompiles and rolls back on failure.
+export const requestRuleUpdate = async ({ id, xml, userRole } = {}) => {
+  const { fetchWithAuth } = require('../utils/fetchWithAuth');
+  const res = await fetchWithAuth(`${SERVER_URL}/api/security/rule-based/rules/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ xml }),
+  }, userRole);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json(); // { ok, id, rules }
+};
+
+// Remove a user-added rule (admin). Predefined rules are protected server-side.
+export const requestRuleDelete = async ({ id, userRole } = {}) => {
+  const { fetchWithAuth } = require('../utils/fetchWithAuth');
+  const res = await fetchWithAuth(`${SERVER_URL}/api/security/rule-based/rules/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  }, userRole);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json(); // { ok, rules }
 };
 
 /**
@@ -936,7 +987,7 @@ export const requestExtractFeatures = async ({ pcapFile, isMalicious, userRole }
 // Assistant API: Explain XAI output (LIME/SHAP) using GPT
 export const requestAssistantExplainXAI = async ({ method, modelId, label, explanation, context, userId, isAdmin }) => {
   const url = `${ASSISTANT_URL}/explain/xai`;
-  const body = { method, modelId, label, explanation, context };
+  const body = { method, modelId, label, explanation, context, ...assistantConfigBody() };
   const response = await fetch(url, {
     method: 'POST',
     headers: {
