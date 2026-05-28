@@ -2,7 +2,6 @@ import React, { Component } from "react";
 import { connect } from "react-redux";
 import { notification, Spin, Layout, Typography } from "antd";
 import { resetNotification } from "../actions";
-import AssistantSettings from "../components/AssistantSettings";
 import "./styles.css";
 const { Title, Text } = Typography;
 
@@ -31,9 +30,6 @@ class LayoutPage extends Component {
           })}
         <Layout style={{ padding: "0px 48px 48px", margin: "30px 50px 50px" }}>
           <Content>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}>
-              <AssistantSettings />
-            </div>
             {pageTitle && <Title level={2} style={{ marginTop: '8px' }}>{pageTitle}</Title>}
             {pageSubTitle && <Text /* type="secondary" */ italic>{pageSubTitle}</Text>}
             <div style={{ paddingTop: "30px" }} className="site-layout-content">
