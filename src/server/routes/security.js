@@ -25,6 +25,11 @@ const sessionManager = require('../utils/sessionManager');
 const { queueRuleBasedDetection, getJobStatus } = require('../queue/job-queue');
 const { handleQueueError, isRedisError } = require('../utils/queueErrorHelper');
 const { ensureEthernetPcap } = require('../utils/pcapConverter');
+const ruleManager = require('../utils/ruleManager');
+const { requireAdmin } = require('../middleware/userAuth');
+
+// Compile the app-owned rule workspace on startup (idempotent, non-blocking).
+ruleManager.bootstrap().catch(e => console.error('[ruleManager] bootstrap error:', e.message));
 
 // Default to sudo unless explicitly disabled; use non-interactive to avoid blocking
 const SUDO = USE_SUDO === 'false' ? '' : 'sudo -n ';
@@ -372,6 +377,60 @@ router.get('/rule-based/alerts', async (req, res) => {
   }
 });
 
+// List available rules (catalog for the selection table)
+router.get('/rule-based/rules', async (req, res) => {
+  try {
+    const refresh = req.query.refresh === 'true';
+    res.json({ ok: true, rules: await ruleManager.listRules({ refresh }) });
+  } catch (e) {
+    res.status(500).send(e.message || 'Failed to list rules');
+  }
+});
+
+// Raw XML source of a single rule
+router.get('/rule-based/rules/:id/xml', (req, res) => {
+  const xml = ruleManager.getRuleXml(req.params.id);
+  if (!xml) return res.status(404).send('No XML source for this rule');
+  res.type('application/xml').send(xml);
+});
+
+// Add a user rule (admin): { filename, xml }. Compiles and validates before saving.
+router.post('/rule-based/rules', requireAdmin, async (req, res) => {
+  try {
+    const { filename, xml } = req.body || {};
+    if (!filename || !xml) return res.status(400).send('Missing filename or xml');
+    const r = await ruleManager.addRule(filename, xml);
+    if (!r.ok) return res.status(400).send(r.error);
+    res.json({ ok: true, id: r.id, rules: await ruleManager.listRules({ refresh: true }) });
+  } catch (e) {
+    res.status(500).send(e.message || 'Failed to add rule');
+  }
+});
+
+// Edit a user-added rule's XML (admin). Predefined rules are protected.
+router.put('/rule-based/rules/:id', requireAdmin, async (req, res) => {
+  try {
+    const { xml } = req.body || {};
+    if (!xml) return res.status(400).send('Missing xml');
+    const r = await ruleManager.updateRule(req.params.id, xml);
+    if (!r.ok) return res.status(400).send(r.error);
+    res.json({ ok: true, id: r.id, rules: await ruleManager.listRules({ refresh: true }) });
+  } catch (e) {
+    res.status(500).send(e.message || 'Failed to update rule');
+  }
+});
+
+// Remove a user-added rule (admin). Predefined rules are protected.
+router.delete('/rule-based/rules/:id', requireAdmin, async (req, res) => {
+  try {
+    const r = ruleManager.deleteRule(req.params.id);
+    if (!r.ok) return res.status(400).send(r.error);
+    res.json({ ok: true, rules: await ruleManager.listRules({ refresh: true }) });
+  } catch (e) {
+    res.status(500).send(e.message || 'Failed to remove rule');
+  }
+});
+
 router.post('/rule-based/online/start', async (req, res) => {
   try {
     const { iface, intervalSec = 5, verbose = true, excludeRules, cores, filterIPs } = req.body || {};
@@ -420,7 +479,7 @@ router.post('/rule-based/online/start', async (req, res) => {
     console.log('[SECURITY][rule-based][online] Executing:', cmd);
 
     // Spawn via bash so sudo can prompt non-interactively (assume configured). We do not pipe stdin.
-    const child = spawn('bash', ['-lc', cmd], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('bash', ['-lc', cmd], { stdio: ['ignore', 'pipe', 'pipe'], cwd: ruleManager.WORKSPACE });
     const verdictMap = new Map();
     let combinedLog = '';
     const parseAndUpdate = (txt) => {
@@ -765,7 +824,7 @@ router.post('/rule-based/offline', async (req, res) => {
       cores,
     });
 
-    exec(cmd, (error, stdout, stderr) => {
+    exec(cmd, { cwd: ruleManager.WORKSPACE }, (error, stdout, stderr) => {
       if (error) {
         console.error('mmt_security offline error:', stderr || error.message);
         sessionManager.updateSession('attacks', sessionId, {
