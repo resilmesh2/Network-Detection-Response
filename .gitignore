@@ -32,6 +32,12 @@ src/public/
 src/server/mmt/outputs/
 src/server/mmt/pcaps/
 
+# MMT rules runtime data
+# Compiled rules are generated from xml/ on bootstrap — never commit them.
+src/server/mmt-rules/rules/
+# Runtime manifest of user-added rule ids.
+src/server/mmt-rules/user-rules.json
+
 # Deep-learning runtime data
 src/server/deep-learning/attacks/
 src/server/deep-learning/trainings/

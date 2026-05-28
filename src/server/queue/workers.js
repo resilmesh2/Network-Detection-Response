@@ -609,7 +609,8 @@ ruleBasedQueue.process('detect', CONCURRENCY.ruleBasedDetection, async (job) => 
 
     // Execute mmt_security
     const mmtStart = Date.now();
-    const { stdout, stderr } = await execAsync(cmd);
+    const { WORKSPACE } = require('../utils/ruleManager');
+    const { stdout, stderr } = await execAsync(cmd, { cwd: WORKSPACE });
     const mmtMs = Date.now() - mmtStart;
     console.log(`[Worker][mmt_security] Completed in ${(mmtMs / 1000).toFixed(1)} s`);
 

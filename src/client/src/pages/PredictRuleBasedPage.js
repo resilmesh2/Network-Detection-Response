@@ -2,8 +2,8 @@ import React, { Component } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import LayoutPage from './LayoutPage';
-import { Form, Select, Button, Table, Divider, Tooltip, Upload, Spin, message, notification, Dropdown, Menu, Modal, Card, Row, Col, Statistic, Tag, Space, Alert, Typography, Input } from 'antd';
-import { UploadOutlined, DeleteOutlined, PlayCircleOutlined, StopOutlined, SendOutlined, LockOutlined, FileTextOutlined, CheckCircleOutlined, WarningOutlined, UserOutlined, DatabaseOutlined, FilterOutlined, CloudServerOutlined, PlusOutlined, ApiOutlined } from '@ant-design/icons';
+import { Form, Select, Button, Table, Divider, Tooltip, Upload, Spin, message, notification, Dropdown, Menu, Modal, Card, Row, Col, Statistic, Tag, Space, Alert, Typography, Input, Collapse, Popconfirm } from 'antd';
+import { UploadOutlined, DeleteOutlined, EditOutlined, PlayCircleOutlined, StopOutlined, SendOutlined, LockOutlined, FileTextOutlined, CheckCircleOutlined, WarningOutlined, UserOutlined, DatabaseOutlined, FilterOutlined, CloudServerOutlined, PlusOutlined, ApiOutlined } from '@ant-design/icons';
 import { useUserRole } from '../hooks/useUserRole';
 import { Line } from '@ant-design/plots';
 import {
@@ -19,6 +19,11 @@ import {
   requestRuleOnlineStart,
   requestRuleOnlineStop,
   requestRuleOffline,
+  requestRuleList,
+  requestRuleXml,
+  requestRuleUpload,
+  requestRuleUpdate,
+  requestRuleDelete,
   requestAssistantExplainFlow,
   requestISIMStatus,
   requestISIMAssets,
@@ -67,7 +72,236 @@ class PredictRuleBasedPage extends Component {
       isimConnected: null, // null = unknown, true = connected, false = disconnected
       isimAssets: [], // Critical assets from ISIM
       isimSelectedRowKeys: [], // Selected rows in ISIM table
+      // Rule selection / management
+      rules: [],
+      rulesLoading: false,
+      enabledRuleIds: [], // checked = run; unchecked rules become -x exclude list
+      useRulesInput: '', // include-spec mirror of enabledRuleIds, e.g. "110-117, 56" ('' = all)
+      ruleXmlModal: { visible: false, id: null, xml: '', loading: false },
+      addRuleModal: { visible: false, filename: '', xml: '', submitting: false },
+      editRuleModal: { visible: false, id: null, xml: '', loading: false, submitting: false },
     };
+  }
+
+  // Load the rule catalog; enable all rules by default.
+  fetchRules = async (refresh = false) => {
+    this.setState({ rulesLoading: true });
+    try {
+      const { rules } = await requestRuleList({ refresh });
+      this.setState({
+        rules: rules || [],
+        enabledRuleIds: (rules || []).map(r => r.id),
+        rulesLoading: false,
+      });
+    } catch (e) {
+      this.setState({ rulesLoading: false });
+      notification.error({ message: 'Failed to load rules', description: e.message, placement: 'topRight' });
+    }
+  }
+
+  // Build the mmt-security -x argument from rules the user left unchecked.
+  // No selection (or all selected) => run everything (no -x).
+  computeExcludeRules = () => {
+    const enabled = new Set(this.state.enabledRuleIds);
+    if (enabled.size === 0) return '';
+    return this.state.rules.filter(r => !enabled.has(r.id)).map(r => r.id).join(',');
+  }
+
+  // Parse an include spec like "110-117, 56, 90-93" into existing rule ids.
+  parseRuleSpec = (spec) => {
+    const valid = new Set(this.state.rules.map(r => r.id));
+    const ids = new Set();
+    String(spec || '').split(/[\s,;]+/).filter(Boolean).forEach(tok => {
+      const range = tok.match(/^(\d+)-(\d+)$/);
+      if (range) {
+        const [a, b] = [Number(range[1]), Number(range[2])].sort((x, y) => x - y);
+        for (let i = a; i <= b; i++) if (valid.has(i)) ids.add(i);
+      } else if (/^\d+$/.test(tok) && valid.has(Number(tok))) {
+        ids.add(Number(tok));
+      }
+    });
+    return [...ids].sort((a, b) => a - b);
+  }
+
+  // Compress a sorted id list into a compact spec, e.g. [1,4,5,6] -> "1,4-6". All ids -> ''.
+  formatRuleSpec = (ids) => {
+    if (ids.length === 0 || ids.length === this.state.rules.length) return '';
+    const sorted = [...ids].sort((a, b) => a - b);
+    const parts = [];
+    let start = sorted[0], prev = sorted[0];
+    for (let i = 1; i <= sorted.length; i++) {
+      if (sorted[i] === prev + 1) { prev = sorted[i]; continue; }
+      parts.push(start === prev ? `${start}` : `${start}-${prev}`);
+      start = prev = sorted[i];
+    }
+    return parts.join(',');
+  }
+
+  // Set enabled rules from the text box. Empty input => all rules; the table
+  // then shows only the rules in use.
+  applyUseRules = () => {
+    const spec = this.state.useRulesInput.trim();
+    if (!spec) { this.resetUseRules(); return; }
+    const ids = this.parseRuleSpec(spec);
+    if (ids.length === 0) {
+      message.warning('No valid rule IDs in that range (e.g. 110-117, 56)');
+      return;
+    }
+    this.setState({ enabledRuleIds: ids, useRulesInput: this.formatRuleSpec(ids) });
+  }
+
+  // Back to using every rule.
+  resetUseRules = () => {
+    this.setState({ enabledRuleIds: this.state.rules.map(r => r.id), useRulesInput: '' });
+  }
+
+  handleViewRuleXml = async (id) => {
+    this.setState({ ruleXmlModal: { visible: true, id, xml: '', loading: true } });
+    try {
+      const xml = await requestRuleXml(id);
+      this.setState({ ruleXmlModal: { visible: true, id, xml, loading: false } });
+    } catch (e) {
+      this.setState({ ruleXmlModal: { visible: true, id, xml: `Error: ${e.message}`, loading: false } });
+    }
+  }
+
+  handleAddRule = async () => {
+    const { filename, xml } = this.state.addRuleModal;
+    if (!filename.trim() || !xml.trim()) {
+      message.warning('Provide both a filename (e.g. 300.my_rule.xml) and XML content');
+      return;
+    }
+    this.setState(p => ({ addRuleModal: { ...p.addRuleModal, submitting: true } }));
+    try {
+      const { rules } = await requestRuleUpload({ filename: filename.trim(), xml, userRole: this.props.userRole });
+      this.setState(p => ({
+        rules: rules || [],
+        enabledRuleIds: [...new Set([...p.enabledRuleIds, ...(rules || []).map(r => r.id)])],
+        addRuleModal: { visible: false, filename: '', xml: '', submitting: false },
+      }));
+      notification.success({ message: 'Rule added', description: `${filename} compiled and added`, placement: 'topRight' });
+    } catch (e) {
+      this.setState(p => ({ addRuleModal: { ...p.addRuleModal, submitting: false } }));
+      notification.error({ message: 'Rule rejected', description: e.message, placement: 'topRight', duration: 8 });
+    }
+  }
+
+  handleOpenEditRule = async (id) => {
+    this.setState({ editRuleModal: { visible: true, id, xml: '', loading: true, submitting: false } });
+    try {
+      const xml = await requestRuleXml(id);
+      this.setState(p => ({ editRuleModal: { ...p.editRuleModal, xml, loading: false } }));
+    } catch (e) {
+      this.setState(p => ({ editRuleModal: { ...p.editRuleModal, xml: `Error: ${e.message}`, loading: false } }));
+    }
+  }
+
+  handleSaveEditRule = async () => {
+    const { id, xml } = this.state.editRuleModal;
+    this.setState(p => ({ editRuleModal: { ...p.editRuleModal, submitting: true } }));
+    try {
+      const { rules } = await requestRuleUpdate({ id, xml, userRole: this.props.userRole });
+      this.setState({ rules: rules || [], editRuleModal: { visible: false, id: null, xml: '', loading: false, submitting: false } });
+      notification.success({ message: 'Rule updated', description: `Rule ${id} recompiled and saved`, placement: 'topRight' });
+    } catch (e) {
+      this.setState(p => ({ editRuleModal: { ...p.editRuleModal, submitting: false } }));
+      notification.error({ message: 'Update rejected', description: e.message, placement: 'topRight', duration: 8 });
+    }
+  }
+
+  handleDeleteRule = async (id) => {
+    try {
+      const { rules } = await requestRuleDelete({ id, userRole: this.props.userRole });
+      this.setState(p => ({
+        rules: rules || [],
+        enabledRuleIds: p.enabledRuleIds.filter(rid => rid !== id),
+      }));
+      notification.success({ message: 'Rule removed', description: `Rule ${id} deleted`, placement: 'topRight' });
+    } catch (e) {
+      notification.error({ message: 'Failed to remove rule', description: e.message, placement: 'topRight' });
+    }
+  }
+
+  renderRuleSelection() {
+    const { rules, rulesLoading, enabledRuleIds } = this.state;
+    const disabled = this.state.onlineRunning || this.state.offlineLoading;
+    const usingAll = enabledRuleIds.length === 0 || enabledRuleIds.length === rules.length;
+    const enabledSet = new Set(enabledRuleIds);
+    const displayedRules = usingAll ? rules : rules.filter(r => enabledSet.has(r.id));
+    const typeColor = (t) => ({ attack: 'red', evasion: 'orange', anomaly: 'gold' }[String(t).toLowerCase()] || 'blue');
+    const columns = [
+      { title: 'Rule ID', dataIndex: 'id', key: 'id', width: 90, sorter: (a, b) => a.id - b.id },
+      { title: 'Type', dataIndex: 'type', key: 'type', width: 110,
+        filters: [...new Set(rules.map(r => r.type))].filter(Boolean).map(t => ({ text: t, value: t })),
+        onFilter: (v, r) => r.type === v,
+        render: (t) => t ? <Tag color={typeColor(t)}>{t}</Tag> : '-' },
+      { title: 'Description', dataIndex: 'description', key: 'description', ellipsis: true,
+        render: (d) => <Tooltip title={d}>{d || '-'}</Tooltip> },
+      { title: 'Action', key: 'action', width: 210,
+        render: (_, r) => (
+          <Space size={4}>
+            {r.hasXml
+              ? <Button size="small" icon={<FileTextOutlined />} onClick={() => this.handleViewRuleXml(r.id)}>XML</Button>
+              : <Typography.Text type="secondary" style={{ fontSize: 12 }}>no source</Typography.Text>}
+            {r.userAdded && this.props.isAdmin && (
+              <>
+                <Button size="small" icon={<EditOutlined />} disabled={disabled} onClick={() => this.handleOpenEditRule(r.id)} />
+                <Popconfirm title={`Remove rule ${r.id}?`} okText="Remove" okButtonProps={{ danger: true }}
+                  onConfirm={() => this.handleDeleteRule(r.id)} disabled={disabled}>
+                  <Button size="small" danger icon={<DeleteOutlined />} disabled={disabled} />
+                </Popconfirm>
+              </>
+            )}
+          </Space>
+        ) },
+    ];
+    return (
+      <Collapse style={{ marginTop: 16 }} items={[{
+        key: 'rules',
+        label: <span><strong>Rule Selection</strong> — {usingAll
+          ? `all ${rules.length} rules run`
+          : <span>using {displayedRules.length} of {rules.length} rules (others excluded via <code>-x</code>)</span>}</span>,
+        extra: this.props.isAdmin ? (
+          <Button size="small" icon={<PlusOutlined />} disabled={disabled}
+            onClick={(e) => { e.stopPropagation(); this.setState({ addRuleModal: { visible: true, filename: '', xml: '', submitting: false } }); }}>
+            Add rule
+          </Button>
+        ) : null,
+        children: (
+          <>
+            <Space style={{ marginBottom: 12 }} wrap>
+              <Tooltip title="Run only these rule IDs. Accepts ranges and lists, e.g. 110-117, 56, 90-93. Leave empty to run all rules.">
+                <strong style={{ fontSize: 14 }}>Use only rules:</strong>
+              </Tooltip>
+              <Input
+                placeholder="e.g. 110-117, 56  (empty = all rules)"
+                value={this.state.useRulesInput}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  // Emptying the box (incl. the clear "x") immediately shows all rules.
+                  if (!v.trim()) this.resetUseRules();
+                  else this.setState({ useRulesInput: v });
+                }}
+                onPressEnter={this.applyUseRules}
+                disabled={disabled}
+                style={{ width: 320 }}
+                allowClear
+              />
+              <Button type="primary" onClick={this.applyUseRules} disabled={disabled}>Apply</Button>
+              <Button onClick={this.resetUseRules} disabled={disabled || usingAll}>Show all</Button>
+            </Space>
+            <Table
+              rowKey="id"
+              size="small"
+              loading={rulesLoading}
+              columns={columns}
+              dataSource={displayedRules}
+              pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (t) => `Total ${t} rules` }}
+            />
+          </>
+        ),
+      }]} />
+    );
   }
 
   // Parse filterIPs input string into array of valid IPs
@@ -244,6 +478,7 @@ class PredictRuleBasedPage extends Component {
 
   componentDidMount() {
     this.fetchInterfaces();
+    this.fetchRules();
     // Load PCAP files only after auth is loaded so x-user-id is sent
     if (this.props.isAuthLoaded) {
       this.fetchPcapFiles();
@@ -404,7 +639,7 @@ class PredictRuleBasedPage extends Component {
 
       // Clear previous alerts for a fresh run
       this.setState({ alerts: [], alertSeries: [], alertSeriesByRule: [], detectionComplete: true, activeFilterIPs: filterIPs });
-      const data = await requestRuleOnlineStart({ iface, intervalSec, filterIPs });
+      const data = await requestRuleOnlineStart({ iface, intervalSec, filterIPs, excludeRules: this.computeExcludeRules() });
 
       this.setState({ onlineRunning: true, status: data }, () => {
         const filterMsg = filterIPs ? ` (filtering ${filterIPs.length} IPs)` : '';
@@ -534,7 +769,7 @@ class PredictRuleBasedPage extends Component {
         placement: 'topRight',
         duration: 2,
       });
-      const data = await requestRuleOffline({ pcapFile, userRole: this.props.userRole, filterIPs });
+      const data = await requestRuleOffline({ pcapFile, userRole: this.props.userRole, filterIPs, excludeRules: this.computeExcludeRules() });
       notification.success({
         message: 'Success',
         description: `Offline detection finished: ${data.count} alerts`,
@@ -606,7 +841,7 @@ class PredictRuleBasedPage extends Component {
         return '';
       }
     }},
-    { title: 'Mitigation', key: 'actions', width: 140, fixed: 'right', align: 'center', render: (_, row) => {
+    { title: 'Mitigation', key: 'actions', width: 140, align: 'center', render: (_, row) => {
       try {
         const { srcIp, dstIp } = computeFlowDetails(row);
         const validSrc = isValidIPv4(srcIp);
@@ -958,6 +1193,8 @@ class PredictRuleBasedPage extends Component {
               </Typography.Text>
             </Col>
           </Row>
+
+          {this.renderRuleSelection()}
         </Card>
 
         <Divider orientation="left">
@@ -1172,6 +1409,75 @@ class PredictRuleBasedPage extends Component {
             </>
           )}
         </Modal>
+
+        {/* View rule XML */}
+        <Modal
+          title={`Rule ${this.state.ruleXmlModal.id} — XML source`}
+          open={this.state.ruleXmlModal.visible}
+          onCancel={() => this.setState({ ruleXmlModal: { visible: false, id: null, xml: '', loading: false } })}
+          footer={[
+            <Button key="copy" onClick={() => navigator.clipboard?.writeText(this.state.ruleXmlModal.xml)}>Copy</Button>,
+            <Button key="close" type="primary" onClick={() => this.setState({ ruleXmlModal: { visible: false, id: null, xml: '', loading: false } })}>Close</Button>,
+          ]}
+          width={760}
+        >
+          {this.state.ruleXmlModal.loading
+            ? <Spin />
+            : <pre style={{ maxHeight: 460, overflow: 'auto', background: '#f6f6f6', padding: 12, whiteSpace: 'pre-wrap', fontSize: 12 }}>{this.state.ruleXmlModal.xml}</pre>}
+        </Modal>
+
+        {/* Add a new rule (admin) */}
+        <Modal
+          title="Add rule"
+          open={this.state.addRuleModal.visible}
+          onCancel={() => this.setState({ addRuleModal: { visible: false, filename: '', xml: '', submitting: false } })}
+          onOk={this.handleAddRule}
+          okText="Compile & add"
+          confirmLoading={this.state.addRuleModal.submitting}
+          width={760}
+        >
+          <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+            The XML is compiled with <code>compile_rule</code> on the server; it is only added if compilation succeeds.
+            Filename must be <code>&lt;id&gt;.&lt;name&gt;.xml</code> (e.g. <code>300.my_rule.xml</code>).
+          </Typography.Paragraph>
+          <Input
+            placeholder="300.my_rule.xml"
+            value={this.state.addRuleModal.filename}
+            onChange={(e) => this.setState(p => ({ addRuleModal: { ...p.addRuleModal, filename: e.target.value } }))}
+            style={{ marginBottom: 8 }}
+          />
+          <Input.TextArea
+            placeholder="<beginning> ... </beginning>"
+            value={this.state.addRuleModal.xml}
+            onChange={(e) => this.setState(p => ({ addRuleModal: { ...p.addRuleModal, xml: e.target.value } }))}
+            rows={14}
+            style={{ fontFamily: 'monospace', fontSize: 12 }}
+          />
+        </Modal>
+
+        {/* Edit a user-added rule (admin) */}
+        <Modal
+          title={`Edit rule ${this.state.editRuleModal.id}`}
+          open={this.state.editRuleModal.visible}
+          onCancel={() => this.setState({ editRuleModal: { visible: false, id: null, xml: '', loading: false, submitting: false } })}
+          onOk={this.handleSaveEditRule}
+          okText="Recompile & save"
+          okButtonProps={{ disabled: this.state.editRuleModal.loading }}
+          confirmLoading={this.state.editRuleModal.submitting}
+          width={760}
+        >
+          <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+            Keep <code>property_id="{this.state.editRuleModal.id}"</code> unchanged. The rule is recompiled on save; if it fails to compile, the previous version is kept.
+          </Typography.Paragraph>
+          {this.state.editRuleModal.loading
+            ? <Spin />
+            : <Input.TextArea
+                value={this.state.editRuleModal.xml}
+                onChange={(e) => this.setState(p => ({ editRuleModal: { ...p.editRuleModal, xml: e.target.value } }))}
+                rows={16}
+                style={{ fontFamily: 'monospace', fontSize: 12 }}
+              />}
+        </Modal>
       </LayoutPage>
     );
   }
@@ -1180,7 +1486,7 @@ class PredictRuleBasedPage extends Component {
 // Wrap with role check
 const PredictRuleBasedPageWithRole = (props) => {
   const userRole = useUserRole();
-  return <PredictRuleBasedPage {...props} userRole={userRole} canPerformOnlineActions={userRole.canPerformOnlineActions} isSignedIn={userRole.isSignedIn} isAuthLoaded={userRole.isLoaded} />;
+  return <PredictRuleBasedPage {...props} userRole={userRole} canPerformOnlineActions={userRole.canPerformOnlineActions} isAdmin={userRole.isAdmin} isSignedIn={userRole.isSignedIn} isAuthLoaded={userRole.isLoaded} />;
 };
 
 export default PredictRuleBasedPageWithRole;
