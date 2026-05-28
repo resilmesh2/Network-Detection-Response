@@ -105,7 +105,6 @@ export function buildAttackTable({ csvString, onAction, buildMenu, sortColumns =
       title: 'Mitigation',
       key: 'mitigation',
       width: 120,
-      fixed: 'right',
       align: 'center',
       render: (_, record) => (
         <Dropdown
